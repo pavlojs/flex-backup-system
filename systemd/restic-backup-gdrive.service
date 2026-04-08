@@ -1,0 +1,22 @@
+[Unit]
+Description=Restic Backup to Google Drive (via rclone)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/root/.backup-secrets-gdrive.env
+ExecStart=/root/restic-backup-gdrive.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=50%
+
+# Security hardening
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/log /var/lib/docker/volumes /home/pavlojs/apps /root
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
