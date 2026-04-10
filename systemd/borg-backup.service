@@ -1,0 +1,26 @@
+[Unit]
+Description=BorgBackup + rclone sync to cloud
+Documentation=https://github.com/pavlojs/flex-backup-system
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/root/.backup-secrets.env
+ExecStart=/root/borg-backup.sh
+
+# Resource limits — don't starve other services
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=50%
+
+# Security hardening
+PrivateTmp=true
+ProtectSystem=full
+NoNewPrivileges=true
+ProtectHome=false
+ReadWritePaths=/var/log /var/backups /var/lock /root
+
+[Install]
+WantedBy=multi-user.target

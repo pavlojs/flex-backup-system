@@ -1,0 +1,11 @@
+[Unit]
+Description=Monthly BorgBackup restore verification
+Documentation=https://github.com/pavlojs/flex-backup-system
+
+[Timer]
+OnCalendar=*-*-01 04:00:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
