@@ -1,348 +1,420 @@
-# Disaster Recovery — Data Recovery Guide
+# Disaster Recovery Guide
 
-> **Who is this document for?**
-> For someone who has never worked with backups and needs to restore a server after a failure.
-> Read step by step. Do not skip any steps.
+**Written for non-technical users.** Follow the steps exactly as shown.
 
 ---
 
-## Before You Start — What You Need
+## Table of Contents
 
-Before proceeding with recovery, make sure you have access to:
-
-- [ ] The `/root/.backup-secrets.env` file (or a copy saved in a password manager)
-- [ ] The restic repository password (the `RESTIC_PASSWORD` field from the file above)
-- [ ] Access to the Cloudflare dashboard (to verify your data is there)
-- [ ] A new or restored Ubuntu server
-
----
-
-## Glossary — Terms Explained
-
-| Term | Meaning |
-|---|---|
-| **Restic** | The program that created your backups. Now it will restore them. |
-| **Snapshot** | One backup from a specific day, like a "photo" of your server in time. |
-| **Repository** | The location on Cloudflare R2 where all snapshots are stored. |
-| **R2** | Cloudflare R2 — the cloud storage service where your data physically lives. |
-| **Restore** | Recovery — copying data from a backup back to your server. |
+1. [Glossary — What These Words Mean](#1-glossary)
+2. [How to Check That Backups Are Working](#2-how-to-check-that-backups-are-working)
+3. [Scenario A — I Accidentally Deleted Files](#3-scenario-a--i-accidentally-deleted-files)
+4. [Scenario B — The Server's Disk Failed](#4-scenario-b--the-servers-disk-failed)
+5. [Scenario C — The Server Was Hacked](#5-scenario-c--the-server-was-hacked)
+6. [Scenario D — The VPS Was Deleted / Starting From Scratch](#6-scenario-d--the-vps-was-deleted--starting-from-scratch)
+7. [How to Remove Everything and Return to a Clean System](#7-how-to-remove-everything)
+8. [Important Paths and Files](#8-important-paths-and-files)
+9. [What You Need to Have Saved](#9-what-you-need-to-have-saved)
+10. [Contacts](#10-contacts)
 
 ---
 
-## PART 1 — Verifying Your Backup Works (Verification)
+## 1. Glossary
 
-> Do these steps when **there is no failure** — once a month to be sure.
-
-### Step 1.1 — Log in to your server
-
-```bash
-ssh root@SERVER_ADDRESS
-```
-
-### Step 1.2 — Load the configuration
-
-```bash
-source /root/.backup-secrets.env
-```
-
-If this command returns an error, the secrets file doesn't exist — go to Part 3.
-
-### Step 1.3 — List your backups
-
-```bash
-restic snapshots
-```
-
-You should see a table similar to this:
-
-```
-ID        Time                 Host         Paths
--------------------------------------------------------
-a1b2c3d4  2025-01-15 03:00:12  my-server    /var/lib/docker/volumes
-e5f6g7h8  2025-01-14 03:00:08  my-server    /var/lib/docker/volumes
-```
-
-Each row is one backup from one day. **If the list is empty — backups are not working.**
-
-### Step 1.4 — Verify data integrity
-
-```bash
-restic check
-```
-
-At the end you should see: `no errors were found`. Anything else — contact your administrator.
+| Term | What it means |
+|------|---------------|
+| **BorgBackup (borg)** | The program that creates backups. It saves your files in a special compressed and encrypted format. |
+| **Archive** | One backup snapshot. Like a photo of all your files taken at a specific time. |
+| **Repository (repo)** | The place where all archives are stored. Think of it as a folder containing all your backup photos. |
+| **rclone** | A program that copies the repository to the cloud (Cloudflare R2 or Google Drive). |
+| **R2** | Cloudflare's cloud storage service where an offsite copy of your backups lives. |
+| **Passphrase** | The password that encrypts your backups. Without it, nobody (including you) can read them. |
+| **Borg key** | A special key file used together with the passphrase to unlock backups. You must have BOTH. |
 
 ---
 
-## PART 2 — Recovery After Failure (Disaster Recovery)
+## 2. How to Check That Backups Are Working
 
-### Scenario A — Server is running, but I deleted/overwritten files
-
-This is the simplest case. The server is up, restic is installed.
-
-#### Step A.1 — Load the configuration
+### Quick check (30 seconds)
 
 ```bash
-source /root/.backup-secrets.env
+# When was the last successful backup?
+cat /var/log/borg-backup-last-success
 ```
 
-#### Step A.2 — Find the right snapshot
+If the date is today or yesterday, backups are working.
+
+### Detailed check
 
 ```bash
-restic snapshots
+# Are the timers active?
+systemctl list-timers borg-*
+
+# What was the result of the last backup?
+systemctl status borg-backup.service
+
+# List all backup archives
+source /root/.backup-secrets.env && export BORG_REPO BORG_PASSPHRASE
+borg list
 ```
 
-Remember the **ID** of the snapshot from the day you want to restore (e.g., `a1b2c3d4`).
-If you always want the latest one, you can write `latest` instead of a specific ID.
+### Monthly restore test
 
-#### Step A.3 — Restore a specific folder or file
-
-Restore **one directory** to its original location:
+The system automatically tests restore on the 1st of every month and sends a Gotify notification. Check:
 
 ```bash
-restic restore latest \
-  --target / \
-  --include /home/pavlojs/apps
+cat /var/log/borg-test-restore-last
 ```
-
-Restore **a specific file** (e.g., a database):
-
-```bash
-restic restore latest \
-  --target /tmp/restored \
-  --include /var/lib/docker/volumes/my-container/_data/database.db
-```
-
-The file will appear in `/tmp/restored/` — you can check it before moving it to the correct location.
-
-#### Step A.4 — Restore everything
-
-```bash
-restic restore latest --target /
-```
-
-> ⚠️ **Warning:** This will overwrite existing files with their backup versions. Make sure this is what you want.
 
 ---
 
-### Scenario B — Server completely down, setting up a new one
+## 3. Scenario A — I Accidentally Deleted Files
 
-#### Step B.1 — Install the system and basic tools
+**Situation**: The server is running fine, but you deleted some files by mistake.
 
-On a fresh Ubuntu:
+### Step 1: Find which archive has your files
 
 ```bash
-apt-get update && apt-get install -y restic
+# Load backup credentials
+source /root/.backup-secrets.env && export BORG_REPO BORG_PASSPHRASE
+
+# List all archives (newest last)
+borg list
 ```
 
-#### Step B.2 — Restore your secrets file
+You'll see something like:
 
-You need to manually create the `/root/.backup-secrets.env` file with the data you saved securely:
+```
+myserver-2026-04-08T03:00    Mon, 2026-04-08 03:00:15
+myserver-2026-04-09T03:00    Tue, 2026-04-09 03:00:12
+myserver-2026-04-10T03:00    Wed, 2026-04-10 03:00:18
+```
+
+### Step 2: See what's inside an archive
+
+```bash
+# List files in the latest archive
+borg list ::myserver-2026-04-10T03:00 | grep "the-file-you-lost"
+```
+
+### Step 3a: Restore specific files
+
+```bash
+# Restore a specific file to a temporary location
+borg extract ::myserver-2026-04-10T03:00 var/lib/docker/volumes/myapp/data/important-file.txt \
+    --target /tmp/restored
+
+# Check the file
+ls -la /tmp/restored/var/lib/docker/volumes/myapp/data/important-file.txt
+
+# Copy it back to where it belongs
+cp /tmp/restored/var/lib/docker/volumes/myapp/data/important-file.txt \
+   /var/lib/docker/volumes/myapp/data/important-file.txt
+```
+
+### Step 3b: Restore an entire directory
+
+```bash
+# Restore a full Docker volume
+borg extract ::myserver-2026-04-10T03:00 var/lib/docker/volumes/myapp \
+    --target /tmp/restored
+
+# Copy it back
+cp -a /tmp/restored/var/lib/docker/volumes/myapp/* /var/lib/docker/volumes/myapp/
+```
+
+### Step 4: Clean up
+
+```bash
+rm -rf /tmp/restored
+```
+
+### Step 5: Restart affected containers
+
+```bash
+docker restart myapp
+```
+
+---
+
+## 4. Scenario B — The Server's Disk Failed
+
+**Situation**: Your server is running but the disk with data is corrupted or replaced. The local borg repository may be damaged or lost, but the cloud copy is safe.
+
+### Step 1: Restore borg repository from cloud
+
+```bash
+# Install tools (if not already installed)
+apt-get update && apt-get install -y borgbackup rclone
+
+# Recreate the secrets file from your password manager
+nano /root/.backup-secrets.env
+# (Paste the contents you saved in your password manager)
+chmod 600 /root/.backup-secrets.env
+
+# Load credentials
+source /root/.backup-secrets.env && export BORG_REPO BORG_PASSPHRASE
+```
+
+Configure rclone (for R2):
+
+```bash
+rclone config create r2 s3 \
+    provider=Cloudflare \
+    access_key_id="$R2_ACCESS_KEY_ID" \
+    secret_access_key="$R2_SECRET_ACCESS_KEY" \
+    endpoint="$R2_ENDPOINT" \
+    acl=private \
+    no_check_bucket=true
+```
+
+Download the repository:
+
+```bash
+mkdir -p "$BORG_REPO"
+rclone sync "$RCLONE_DEST" "$BORG_REPO" --progress
+```
+
+### Step 2: Import borg key (if needed)
+
+If the borg key was lost with the disk:
+
+```bash
+# Get the key you saved in your password manager
+borg key import :: /path/to/saved-key-file
+# OR paste it interactively:
+borg key import :: -
+# (paste the key, then Ctrl+D)
+```
+
+### Step 3: Verify and restore
+
+```bash
+# Verify repository
+borg check
+
+# List archives
+borg list
+
+# Restore everything
+borg extract ::LATEST_ARCHIVE --target /
+```
+
+### Step 4: Restart services
+
+```bash
+# Restart Docker containers
+docker restart $(docker ps -q)
+
+# Or start specific compose stacks
+cd /home/user/apps/mystack && docker compose up -d
+```
+
+---
+
+## 5. Scenario C — The Server Was Hacked
+
+**Situation**: Your server was compromised. You need to start fresh and restore from backups.
+
+> ⚠️ **IMPORTANT**: Do NOT restore from the local borg repository — it may be tampered with. Restore only from the cloud copy (R2 / Google Drive).
+
+### Step 1: Provision a new server
+
+Order a new VPS (same provider or different — doesn't matter). Install Ubuntu 22.04 or later.
+
+### Step 2: Install tools
+
+```bash
+apt-get update
+apt-get install -y borgbackup curl
+curl -fsSL https://rclone.org/install.sh | bash
+```
+
+### Step 3: Recreate secrets
+
+From your **password manager**, get:
+- The contents of `.backup-secrets.env`
+- The borg repository key
+- The borg passphrase
 
 ```bash
 nano /root/.backup-secrets.env
-```
-
-Paste the content (see the template in this repository: `backup-secrets.env.template`) and fill in the real values.
-
-```bash
+# (paste your saved config)
 chmod 600 /root/.backup-secrets.env
-source /root/.backup-secrets.env
+source /root/.backup-secrets.env && export BORG_REPO BORG_PASSPHRASE
 ```
 
-#### Step B.3 — Verify access to your backup
+### Step 4: Configure rclone and download
+
+For R2:
 
 ```bash
-restic snapshots
+rclone config create r2 s3 \
+    provider=Cloudflare \
+    access_key_id="$R2_ACCESS_KEY_ID" \
+    secret_access_key="$R2_SECRET_ACCESS_KEY" \
+    endpoint="$R2_ENDPOINT" \
+    acl=private \
+    no_check_bucket=true
+
+mkdir -p "$BORG_REPO"
+rclone sync "$RCLONE_DEST" "$BORG_REPO" --progress
 ```
 
-If you see a list of snapshots — your data is safe and ready to be restored.
-
-#### Step B.4 — Restore your data
+For Google Drive:
 
 ```bash
-restic restore latest --target /
+rclone config  # Set up "gdrive" remote interactively
+
+mkdir -p "$BORG_REPO"
+rclone sync "${RCLONE_REMOTE}:${RCLONE_GDRIVE_FOLDER}" "$BORG_REPO" --progress
 ```
 
-#### Step B.5 — Start Docker and containers
+### Step 5: Import borg key
 
 ```bash
-apt-get install -y docker.io docker-compose
-cd /home/pavlojs/apps
-docker-compose up -d
+borg key import :: -
+# (paste the key from your password manager, then Ctrl+D)
 ```
 
-#### Step B.6 — Reinstall the backup script
+### Step 6: Verify repository
 
 ```bash
-cp /home/pavlojs/apps/backup/restic-backup.sh /root/restic-backup.sh
-chmod 700 /root/restic-backup.sh
+borg check
+borg list
 ```
 
-Choose **one** of the scheduling options:
+### Step 7: Restore data
 
-**Option A — Cron:**
 ```bash
-(crontab -l 2>/dev/null; echo "0 3 * * * /root/restic-backup.sh") | crontab -
+# Restore Docker volumes and app data
+borg extract ::LATEST_ARCHIVE --target /
 ```
 
-**Option B — Systemd timer:**
+### Step 8: Install Docker and start services
+
 ```bash
-cp /home/pavlojs/apps/backup/systemd/restic-backup.service /etc/systemd/system/
-cp /home/pavlojs/apps/backup/systemd/restic-backup.timer   /etc/systemd/system/
+# Install Docker
+curl -fsSL https://get.docker.com | bash
+
+# Start your services
+cd /home/user/apps/mystack && docker compose up -d
+```
+
+### Step 9: Re-install backup system
+
+```bash
+git clone https://github.com/pavlojs/flex-backup-system.git
+cd flex-backup-system
+bash borg-setup.sh  # Or borg-setup-gdrive.sh
+```
+
+### Step 10: Rotate ALL credentials
+
+After a hack, **change everything**:
+- R2 API keys (Cloudflare dashboard)
+- Borg passphrase (`borg key change-passphrase`)
+- Gotify token
+- All application passwords
+- SSH keys
+
+---
+
+## 6. Scenario D — The VPS Was Deleted / Starting From Scratch
+
+**Situation**: The VPS is gone entirely. You're starting on a brand new empty server.
+
+Follow **Scenario C** exactly — the steps are the same. The only difference is you don't need to worry about compromised data.
+
+---
+
+## 7. How to Remove Everything
+
+To completely remove the backup system and return to a clean, un-backed-up system:
+
+```bash
+sudo /root/borg-uninstall.sh
+```
+
+The script will interactively ask you to confirm:
+- Stopping systemd timers
+- Deleting the local borg repository
+- Deleting cloud backup data (R2 / Google Drive)
+- Removing config files, scripts, logs
+- Optionally uninstalling borgbackup and rclone
+
+After running this, the server will have no backup system installed.
+
+### Manual removal (if uninstall script is missing)
+
+```bash
+# Stop timers
+systemctl stop borg-backup.timer borg-test-restore.timer
+systemctl disable borg-backup.timer borg-test-restore.timer
+
+# Remove systemd files
+rm -f /etc/systemd/system/borg-backup.{service,timer}
+rm -f /etc/systemd/system/borg-test-restore.{service,timer}
 systemctl daemon-reload
-systemctl enable --now restic-backup.timer
 
-# Check if the timer is active:
-systemctl list-timers restic-backup.timer
-```
+# Delete local repository (CAREFUL — this deletes all local backups!)
+rm -rf /var/backups/borg
 
----
-
-## PART 3 — When Something Doesn't Work — Diagnostics
-
-### Problem: `source /root/.backup-secrets.env` returns "No such file"
-
-Your secrets file is missing. You need to restore it from a copy (password manager, another server).
-Without this file **you cannot restore your data** — that's why keep it in at least two places.
-
-### Problem: `restic snapshots` returns an authorization error
-
-Likely cause: your Cloudflare API key has changed or the token has expired.
-
-1. Log in to [dash.cloudflare.com](https://dash.cloudflare.com)
-2. Go to **R2 → Manage R2 API Tokens**
-3. Create a new token with `Object Read & Write` permissions
-4. Update `/root/.backup-secrets.env`
-
-### Problem: `restic check` shows errors
-
-```bash
-restic rebuild-index
-restic check
-```
-
-If errors persist, run:
-
-```bash
-restic repair snapshots --forget
-```
-
-### Problem: Backup hasn't run in several days (no Gotify notifications)
-
-Check the log:
-
-```bash
-tail -50 /var/log/restic-backup.log
-```
-
-Check if cron or systemd timer is running:
-
-```bash
-# If you're using cron:
-crontab -l
-systemctl status cron
-
-# If you're using systemd timer:
-systemctl list-timers restic-backup.timer
-systemctl status restic-backup.service
-journalctl -u restic-backup.service -n 50
-```
-
-Run it manually:
-
-```bash
-# Cron / directly:
-/root/restic-backup.sh
-
-# Systemd:
-systemctl start restic-backup.service
-```
-
----
-
-## PART 4 — Backup Schedule
-
-| Type | Kept | What it means |
-|---|---|---|
-| Daily | 5 most recent days | You can go back max 5 days |
-| Weekly | 1 (last week's) | One backup from last week |
-| Monthly | 1 (last month's) | One backup from last month |
-
-> Backups run automatically **daily at 3:00 AM**.
-> After each successful or failed backup, a Gotify notification is sent.
-
----
-
-## PART 5 — Important Paths and Files
-
-| What | Where |
-|---|---|
-| Backup script (R2) | `/root/restic-backup.sh` |
-| Backup script (Google Drive) | `/root/restic-backup-gdrive.sh` |
-| Secrets file (R2) | `/root/.backup-secrets.env` |
-| Secrets file (Google Drive) | `/root/.backup-secrets-gdrive.env` |
-| Backup log (R2) | `/var/log/restic-backup.log` |
-| Backup log (Google Drive) | `/var/log/restic-backup-gdrive.log` |
-| Systemd service (R2) | `/etc/systemd/system/restic-backup.service` |
-| Systemd timer (R2) | `/etc/systemd/system/restic-backup.timer` |
-| Systemd service (Google Drive) | `/etc/systemd/system/restic-backup-gdrive.service` |
-| Systemd timer (Google Drive) | `/etc/systemd/system/restic-backup-gdrive.timer` |
-| Rclone config | `~/.config/rclone/rclone.conf` |
-| Docker data | `/var/lib/docker/volumes` |
-| Applications | `/home/pavlojs/apps` |
-
----
-
-## PART 6 — Contacts and Escalation
-
-> Fill in this section with your own information.
-
-| Role | Name | Contact |
-|---|---|---|
-| Server Administrator | | |
-| Cloudflare Account Owner | | |
-| Backup Contact (when admin unavailable) | | |
-
----
-
-## PART 7 — Google Drive Backend (Optional)
-
-> If your backup uses Google Drive instead of (or in addition to) Cloudflare R2.
-
-### Google Drive Secrets File
-
-File: `/root/.backup-secrets-gdrive.env`
-
-Script: `/root/restic-backup-gdrive.sh`
-
-Log: `/var/log/restic-backup-gdrive.log`
-
-### Restoring from Google Drive
-
-The procedure is **identical** to R2. The only difference is the secrets file:
-
-```bash
-# Instead of:
+# Delete cloud data (CAREFUL — this deletes all cloud backups!)
 source /root/.backup-secrets.env
+rclone purge "$RCLONE_DEST"
 
-# Use:
-source /root/.backup-secrets-gdrive.env
+# Remove scripts and config
+rm -f /root/borg-backup.sh /root/borg-test-restore.sh /root/borg-uninstall.sh
+rm -f /root/.backup-secrets.env
+rm -f /var/log/borg-backup.log /var/log/borg-backup-last-success /var/log/borg-test-restore-last
+rm -f /var/lock/borg-backup.lock
+rm -f /etc/logrotate.d/borg-backup
+
+# Optionally remove packages
+apt-get remove -y borgbackup rclone
 ```
-
-Rclone connection issues:
-
-```bash
-rclone config reconnect gdrive:
-```
-
-On a headless server (no browser):
-1. On a computer with a browser, run: `rclone authorize "drive"`
-2. Log in to Google
-3. Copy the token back to the server
-
-All other restic commands (`snapshots`, `restore`, `check`) work the same way.
 
 ---
 
-*Document automatically generated. For the last configuration update, check the date of the latest snapshot (`restic snapshots`).*
+## 8. Important Paths and Files
+
+| Path | Description |
+|------|-------------|
+| `/root/.backup-secrets.env` | All configuration and credentials |
+| `/var/backups/borg/` | Local borg repository (all backup data) |
+| `/root/borg-backup.sh` | Main backup script |
+| `/root/borg-test-restore.sh` | Monthly restore test script |
+| `/root/borg-uninstall.sh` | Uninstall script |
+| `/var/log/borg-backup.log` | Backup log file |
+| `/var/log/borg-backup-last-success` | Timestamp of last successful backup |
+| `/var/log/borg-test-restore-last` | Timestamp of last restore test |
+| `/etc/systemd/system/borg-backup.*` | Systemd service and timer |
+| `/etc/systemd/system/borg-test-restore.*` | Systemd restore test units |
+
+---
+
+## 9. What You Need to Have Saved
+
+To recover from a total loss, you need **three things** stored in your password manager:
+
+| Item | Why you need it | How to get it |
+|------|----------------|---------------|
+| **Borg passphrase** | Decrypts all backup data | From your `.backup-secrets.env` |
+| **Borg repository key** | Required together with passphrase | `borg key export ::` (done during setup) |
+| **`.backup-secrets.env` contents** | R2/GDrive credentials, backup config | Copy from `/root/.backup-secrets.env` |
+
+> ⚠️ If you lose the passphrase OR the key, your backups **cannot be recovered**. There is no reset or recovery option. Save both in at least two places.
+
+---
+
+## 10. Contacts
+
+| Role | Contact |
+|------|---------|
+| System administrator | *(fill in your contact)* |
+| Backup responsible | *(fill in your contact)* |
+
+---
+
+*Last updated: April 2026*

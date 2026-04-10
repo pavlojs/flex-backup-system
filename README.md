@@ -1,480 +1,377 @@
-# Restic Backup Project
+# Flex Backup System
 
-> ⚠️ **NOTICE: This project is currently in active development and testing.**
-> Scripts may contain bugs, incomplete features, or behave unexpectedly.
-> **Do not rely on this as your sole backup solution** until you have personally verified
-> that backups and restores work correctly in your environment.
-> Always test with non-critical data first and maintain an alternative backup strategy.
+**BorgBackup + rclone** — encrypted, deduplicated backups with cloud sync to Cloudflare R2 or Google Drive.
 
-**Automated, encrypted, deduplicated backups** for Linux servers using [restic](https://restic.net/) with two supported backends:
+```
+Docker volumes / app data
+        ↓ borg create (local dedup + AES-256 encryption + zstd compression)
+  /var/backups/borg        ← local repository
+        ↓ rclone sync (only changed segments uploaded)
+  Cloudflare R2 / GDrive   ← offsite cold backup
+```
 
-| Backend | Storage | Cost | Best for |
-|---------|---------|------|----------|
-| **Cloudflare R2** | S3-compatible object storage | Free 10 GB/mo, then ~$0.015/GB | Production servers, fast restore |
-| **Google Drive** *(optional)* | Google Drive via rclone | Free 15 GB (personal), more with Workspace | Budget/personal projects |
+## Why BorgBackup + rclone?
 
-## Features
-
-- 🔐 **AES-256 encrypted** — data is encrypted before leaving your server
-- 📦 **Deduplicated** — only changed blocks are uploaded (saves bandwidth & storage)
-- 🗜️ **Compressed** — maximum compression enabled
-- ⏰ **Automated** — daily cron job **or** systemd timer at 3:00 AM
-- 🔔 **Notifications** — Gotify push notifications on success/failure
-- 🩺 **Self-checking** — verifies 5% of backup data integrity after each run
-- 🧹 **Auto-pruning** — keeps 5 daily + 1 weekly + 1 monthly snapshots
+| Feature | This system |
+|---------|-------------|
+| **Deduplication** | Block-level, across all archives |
+| **Encryption** | AES-256 (repokey-blake2), client-side |
+| **Compression** | zstd level 6 (fast + great ratio) |
+| **Permissions** | uid/gid/chmod preserved natively |
+| **Cloud operations** | ~1-5 rclone ops/day (vs hundreds with Restic chunks) |
+| **R2 free tier safe** | ~1,500 ops/month for 10 containers (limit: 1M) |
+| **Retention** | Configurable daily/weekly/monthly |
+| **Monitoring** | Gotify push notifications + monthly restore test |
 
 ## Project Structure
 
 ```
-├── README.md                              # This file (English)
-├── SECURITY.md                            # Security policy and threat model
-├── disaster-recovery.md                   # Recovery guide (English)
-├── disaster-recovery-pl.md                # Przewodnik odtwarzania (Polish)
-│
-├── ── Cloudflare R2 backend ──
-├── backup-secrets.env.template            # Secrets template (R2)
-├── restic-setup.sh                        # One-time setup script (R2)
-├── restic-backup.sh                       # Daily backup script (R2)
-│
-├── ── Google Drive backend (optional) ──
-├── backup-secrets-gdrive.env.template     # Secrets template (Google Drive)
-├── restic-setup-gdrive.sh                 # One-time setup script (Google Drive)
-├── restic-backup-gdrive.sh                # Daily backup script (Google Drive)
-│
-└── systemd/                               # Systemd units (optional)
-    ├── restic-backup.service              # Service unit (R2)
-    ├── restic-backup.timer                # Timer unit (R2)
-    ├── restic-backup-gdrive.service       # Service unit (Google Drive)
-    └── restic-backup-gdrive.timer         # Timer unit (Google Drive)
+├── borg-backup.sh                  # Main backup script (borg + prune + rclone sync)
+├── borg-test-restore.sh            # Monthly restore verification
+├── borg-setup.sh                   # One-time setup (Cloudflare R2)
+├── borg-setup-gdrive.sh            # One-time setup (Google Drive)
+├── borg-uninstall.sh               # Complete removal of backup system
+├── backup-secrets.env.template     # Config template (R2)
+├── backup-secrets-gdrive.env.template  # Config template (Google Drive)
+├── systemd/
+│   ├── borg-backup.service         # Backup service unit
+│   ├── borg-backup.timer           # Daily timer (03:00)
+│   ├── borg-test-restore.service   # Restore test service unit
+│   └── borg-test-restore.timer     # Monthly timer (1st at 04:00)
+├── disaster-recovery.md            # Step-by-step recovery guide (English)
+├── disaster-recovery-pl.md         # Step-by-step recovery guide (Polish)
+├── SECURITY.md                     # Security model documentation
+└── README.md                       # This file
 ```
-
----
 
 ## Prerequisites
 
-- **Ubuntu/Debian** server (20.04+ recommended)
-- **Root access** (or `sudo`)
-- **curl** and **git** installed
-- **One** of the following backends configured:
-  - Cloudflare account with R2 enabled, **OR**
+- **OS**: Ubuntu/Debian 20.04+ (or any system with apt)
+- **Access**: Root (sudo)
+- **Storage backend** (one of):
+  - Cloudflare R2 account + API token
   - Google account (for Google Drive)
+- **Optional**: [Gotify](https://gotify.net/) server for push notifications
 
----
+## Quick Start — Cloudflare R2
 
-## Setup from Scratch — Cloudflare R2
-
-### Step 1: Create a Cloudflare R2 Bucket
-
-1. Go to [dash.cloudflare.com](https://dash.cloudflare.com)
-2. In the left sidebar, click **R2 Object Storage**
-3. Click **Create bucket**
-4. Name it `restic-backup` (or your preferred name)
-5. Choose a location (Auto is fine)
-6. Click **Create bucket**
-
-### Step 2: Create R2 API Token
-
-1. In the R2 section, click **Manage R2 API Tokens**
-2. Click **Create API token**
-3. Name: `restic-backup`
-4. Permissions: **Object Read & Write**
-5. Scope: Apply to the specific bucket you just created
-6. Click **Create API Token**
-7. **Copy the Access Key ID and Secret Access Key immediately** — they won't be shown again
-
-### Step 3: Note your Account ID
-
-Your Cloudflare Account ID is visible in the R2 dashboard URL or in the right sidebar of any R2 page. It looks like: `a1b2c3d4e5f6g7h8i9j0...`
-
-### Step 4: Clone and Run Setup
+### 1. Clone the repository
 
 ```bash
-# On your server
-cd /root
-git clone https://github.com/YOUR-USERNAME/ResticR2BackupProject.git
-cd ResticR2BackupProject
-
-# Run setup
-chmod +x restic-setup.sh
-./restic-setup.sh
+git clone https://github.com/pavlojs/flex-backup-system.git
+cd flex-backup-system
 ```
 
-The setup script will:
-1. Install `restic` and `awscli`
-2. Copy the secrets template to `/root/.backup-secrets.env`
-3. **Pause** — you fill in your R2 credentials and a strong password
-4. Initialize the restic repository on R2
-5. Set up a daily cron job at 3:00 AM
-
-### Step 5: Fill in Your Secrets
-
-When prompted, edit `/root/.backup-secrets.env`:
+### 2. Run the setup script
 
 ```bash
-# --- Cloudflare R2 ---
-export AWS_ACCESS_KEY_ID="your-r2-access-key-id"
-export AWS_SECRET_ACCESS_KEY="your-r2-secret-access-key"
-export R2_ACCOUNT_ID="your-cloudflare-account-id"
-export R2_BUCKET="restic-backup"
-
-# --- Restic ---
-export RESTIC_PASSWORD="a-very-strong-password-at-least-20-characters"
-
-# --- Gotify (optional) ---
-export GOTIFY_URL="https://gotify.yourdomain.com"
-export GOTIFY_TOKEN="your-gotify-app-token"
+sudo bash borg-setup.sh
 ```
 
-> ⚠️ **CRITICAL**: Save `RESTIC_PASSWORD` in a password manager. If you lose it, **your backups are unrecoverable**.
+The setup will:
+1. Install `borgbackup` and `rclone`
+2. Copy the config template to `/root/.backup-secrets.env`
+3. Prompt you to fill in your R2 credentials
+4. Configure rclone remote `r2` (S3-compatible with R2 endpoint)
+5. Initialize an encrypted borg repository
+6. **Display your borg key — save it in your password manager!**
+7. Install scripts to `/root/`
+8. Enable systemd timers (daily backup + monthly restore test)
+9. Configure log rotation
+10. Optionally run the first backup
 
-### Step 6: Run a Test Backup
+### 3. Configure backup targets
+
+Edit `/root/.backup-secrets.env`:
 
 ```bash
-/root/restic-backup.sh
+# Paths to back up (space-separated)
+BACKUP_PATHS="/var/lib/docker/volumes /home/user/apps"
+
+# Retention policy
+KEEP_DAILY=7
+KEEP_WEEKLY=4
+KEEP_MONTHLY=6
 ```
 
-Check the log:
-```bash
-cat /var/log/restic-backup.log
-```
-
-Check snapshots:
-```bash
-source /root/.backup-secrets.env
-restic snapshots
-```
-
----
-
-## Setup from Scratch — Google Drive (Optional)
-
-### Step 1: Install rclone + restic
+### 4. Verify
 
 ```bash
-cd /root
-git clone https://github.com/YOUR-USERNAME/ResticR2BackupProject.git
-cd ResticR2BackupProject
+# Check timer status
+systemctl list-timers borg-*
 
-chmod +x restic-setup-gdrive.sh
-./restic-setup-gdrive.sh
+# Run manually
+sudo /root/borg-backup.sh
+
+# List archives
+sudo BORG_REPO=/var/backups/borg BORG_PASSPHRASE=<your-pass> borg list
 ```
 
-### Step 2: Configure rclone (Google Drive Remote)
-
-The setup script will launch `rclone config`. Follow these steps:
-
-```
-n) New remote
-name> gdrive
-Storage> drive            (or type the number for "Google Drive")
-client_id>                (press Enter for default)
-client_secret>            (press Enter for default)
-scope> 1                  (Full access)
-root_folder_id>           (press Enter for default)
-service_account_file>     (press Enter for default)
-Edit advanced config> n
-Auto config> y            (if you have a browser, otherwise see below)
-```
-
-#### Headless Server (No Browser)
-
-If your server has no browser (typical for VPS):
-
-1. Choose `n` for "Auto config"
-2. Rclone will show a URL — **open it on your local machine**
-3. Log in to your Google account and authorize rclone
-4. Copy the verification code back to the server terminal
-
-Alternatively, run `rclone authorize "drive"` on a local machine with a browser, then paste the token on the server.
-
-### Step 3: Fill in Secrets
-
-When prompted, edit `/root/.backup-secrets-gdrive.env`:
+## Quick Start — Google Drive
 
 ```bash
-export RCLONE_REMOTE="gdrive"                    # must match rclone config name
-export RCLONE_GDRIVE_FOLDER="restic-backup"      # folder in Google Drive
-export RESTIC_PASSWORD="a-very-strong-password-at-least-20-characters"
-
-# Gotify (optional)
-export GOTIFY_URL="https://gotify.yourdomain.com"
-export GOTIFY_TOKEN="your-gotify-app-token"
+sudo bash borg-setup-gdrive.sh
 ```
 
-### Step 4: Run a Test Backup
+Same flow as R2, except:
+- You'll run `rclone config` interactively to set up OAuth for Google Drive
+- Create a remote named `gdrive`
+- No R2 credentials needed — only `BORG_PASSPHRASE` and `BACKUP_PATHS`
+
+## Configuration Reference
+
+All settings are in `/root/.backup-secrets.env` (created during setup).
+
+### Backup Targets
 
 ```bash
-/root/restic-backup-gdrive.sh
+# Space-separated absolute paths
+BACKUP_PATHS="/var/lib/docker/volumes /home/user/apps /opt/myservice/data"
 ```
 
-Check:
-```bash
-cat /var/log/restic-backup-gdrive.log
-source /root/.backup-secrets-gdrive.env
-restic snapshots
-```
+### Exclusions
 
----
-
-## What Gets Backed Up
-
-By default, these paths are backed up (edit `restic-backup.sh` or `restic-backup-gdrive.sh` to change):
-
-| Path | What it contains |
-|------|-----------------|
-| `/var/lib/docker/volumes` | All Docker container persistent data |
-| `/home/pavlojs/apps` | Application configs, docker-compose files |
-
-### Customizing Backup Paths
-
-Edit the `BACKUP_PATHS` array in the backup script:
+Patterns are applied to all backup paths. One pattern per line:
 
 ```bash
-BACKUP_PATHS=(
-  "/var/lib/docker/volumes"
-  "/home/pavlojs/apps"
-  "/etc/nginx"              # add more paths as needed
-  "/home/user/important"
-)
+BACKUP_EXCLUDES="
+*.log
+*.log.*
+mysql-bin.*
+ib_logfile*
+*.cache
+*/.cache
+__pycache__
+*.pyc
+.npm
+node_modules/.cache
+*.tmp
+*.swp
+.Trash*
+lost+found
+*.sock
+*.pid
+"
 ```
 
----
+Default exclusions prevent silent backup growth from:
+- **Logs**: `*.log`, `*.log.*`, `*.log.gz`
+- **Database binary logs**: `mysql-bin.*`, `ib_logfile*`, `slow-query.log*`, `binlog.*`, `relay-log.*`
+- **Caches**: `*.cache`, `*/.cache`, `__pycache__`, `.npm`, `_cacache`
+- **Temporary files**: `*.tmp`, `*.swp`, `*.bak`, `.Trash*`
+- **Runtime files**: `*.sock`, `*.pid`, `core`, `core.[0-9]*`
 
-## Retention Policy
-
-| Type | Kept | Meaning |
-|------|------|---------|
-| Daily | 5 | Last 5 days of backups |
-| Weekly | 1 | One backup from last week |
-| Monthly | 1 | One backup from last month |
-
-Older snapshots are automatically pruned after each backup run.
-
----
-
-## Gotify Notifications (Optional)
-
-[Gotify](https://gotify.net/) sends push notifications to your phone/browser.
-
-### Quick Gotify Setup
-
-1. Self-host Gotify or use an existing instance
-2. Create an **Application** in Gotify's web UI
-3. Copy the application token
-4. Paste it into your secrets file (`GOTIFY_TOKEN`)
-
-If you don't want notifications, leave `GOTIFY_URL` and `GOTIFY_TOKEN` empty — the Google Drive scripts handle this gracefully. For the R2 scripts, comment out the `gotify_notify` calls.
-
----
-
-## Restoring Data
-
-See **[disaster-recovery.md](disaster-recovery.md)** (English) or **[disaster-recovery-pl.md](disaster-recovery-pl.md)** (Polski) for a complete, step-by-step restore guide.
-
-### Quick Restore Commands
+### Retention Policy
 
 ```bash
-# Load secrets
-source /root/.backup-secrets.env       # R2
-# OR
-source /root/.backup-secrets-gdrive.env  # Google Drive
-
-# List available snapshots
-restic snapshots
-
-# Restore everything from latest snapshot
-restic restore latest --target /
-
-# Restore a specific folder
-restic restore latest --target / --include /home/pavlojs/apps
-
-# Restore to a temporary location (safe)
-restic restore latest --target /tmp/restore --include /var/lib/docker/volumes
-
-# Restore from a specific snapshot (by ID)
-restic restore a1b2c3d4 --target /tmp/restore
-
-# Browse backup contents interactively
-restic mount /mnt/restic
-# Then: ls /mnt/restic/snapshots/latest/
+KEEP_DAILY=7      # Keep last 7 daily archives
+KEEP_WEEKLY=4     # Keep last 4 weekly archives
+KEEP_MONTHLY=6    # Keep last 6 monthly archives
 ```
 
----
+Older archives are pruned automatically after each backup.
 
-## Useful Commands Reference
+### Gotify Notifications
 
 ```bash
-# ── Status & Info ──
-restic snapshots                      # List all snapshots
-restic stats                          # Show repository size
-restic stats latest                   # Show latest snapshot size
-restic ls latest                      # List all files in latest snapshot
-
-# ── Maintenance ──
-restic check                          # Verify repository integrity
-restic check --read-data              # Full data verification (slow)
-restic prune                          # Remove unreferenced data
-restic rebuild-index                  # Fix index issues
-
-# ── Backup ──
-restic backup /path/to/folder         # Manual one-off backup
-restic backup --dry-run /path         # Preview what would be backed up
-
-# ── Troubleshooting ──
-tail -50 /var/log/restic-backup.log   # View recent backup log
-crontab -l                            # Verify cron is set up
-systemctl status cron                 # Check cron service
-
-# ── Systemd timer (if using) ──
-systemctl list-timers restic-backup*  # When is next run?
-systemctl status restic-backup.service # Last run status
-journalctl -u restic-backup.service   # Full service log
+GOTIFY_URL="https://gotify.example.com"
+GOTIFY_TOKEN="your-app-token"
+GOTIFY_PRIORITY_SUCCESS=3   # 1-10
+GOTIFY_PRIORITY_ERROR=8
+GOTIFY_PRIORITY_TEST=5
 ```
 
----
+Leave `GOTIFY_URL` empty to disable notifications.
 
-## Scheduling: Cron vs Systemd Timer
+Notifications are sent for:
+- ✅ **Backup success** — archive name, duration, repo size, retention stats
+- ❌ **Backup failure** — phase that failed, error message
+- ✅/⚠️ **Monthly restore test** — checks passed/failed, details
 
-During setup you're asked to choose between **cron** and a **systemd timer**. Both run the backup daily at 3:00 AM.
+## What Gets Backed Up (and What Doesn't)
 
-### Comparison
+| Backed up ✅ | NOT backed up ❌ |
+|---|---|
+| Docker volume data | Log files (`*.log`) |
+| App configuration | Database binary logs (`mysql-bin.*`) |
+| User data | Cache directories |
+| Database dumps (if in volumes) | Temporary files |
+| Permissions (uid/gid/chmod) | Sockets, PID files |
 
-| Feature | Cron | Systemd Timer |
-|---------|------|---------------|
-| Setup | Single line in crontab | Service + timer unit files |
-| Missed runs (server was off) | ❌ Skipped silently | ✅ `Persistent=true` — runs on next boot |
-| Logging | Manual (`>> logfile`) | Built-in `journalctl` + log file |
-| Resource limits | None | CPU, I/O, memory limits built-in |
-| Status at a glance | `crontab -l` | `systemctl status`, `systemctl list-timers` |
-| Dependency handling | None | Waits for `network-online.target` |
-| Randomized delay | No | ✅ 15 min jitter (avoids thundering herd) |
-| Best for | Simple setups | Production servers |
+## How It Works
 
-### Manual Systemd Setup (Without the Setup Script)
+### Daily Backup Flow (03:00)
 
-If you want to install the systemd units manually:
+1. **Lock** — `flock` prevents parallel runs
+2. **borg create** — deduplicated, compressed, encrypted archive
+3. **borg prune** — remove archives outside retention policy
+4. **borg compact** — free disk space from pruned data
+5. **rclone sync** — upload only changed repository segments to cloud
+6. **Stamp** — write success timestamp to `/var/log/borg-backup-last-success`
+7. **Notify** — Gotify push with stats (or error details on failure)
+
+### Monthly Restore Test (1st of month, 04:00)
+
+1. **borg check** — verify repository integrity
+2. **Dry-run extract** — verify all data chunks are readable
+3. **Real extract** — restore a subset of files to `/tmp/`
+4. **Verify** — check file existence, non-zero sizes, permissions
+5. **Cleanup** — remove test files
+6. **Notify** — Gotify push with test results
+
+### Cloud Sync Efficiency
+
+BorgBackup stores data in large segments (~500MB). When `rclone sync` runs, only modified segments are uploaded. For a typical daily backup of 10 Docker containers:
+
+- **Changed data**: ~50-200 MB
+- **rclone operations**: ~1-5 PUT requests
+- **Monthly total**: ~150 operations (R2 free tier allows 1,000,000)
+
+## Manual Commands
 
 ```bash
-# ── R2 backend ──
-cp systemd/restic-backup.service /etc/systemd/system/
-cp systemd/restic-backup.timer   /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now restic-backup.timer
+# Source environment for interactive use
+source /root/.backup-secrets.env && export BORG_REPO BORG_PASSPHRASE
 
-# ── Google Drive backend ──
-cp systemd/restic-backup-gdrive.service /etc/systemd/system/
-cp systemd/restic-backup-gdrive.timer   /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now restic-backup-gdrive.timer
+# List all archives
+borg list
+
+# Show archive details
+borg info ::ARCHIVE_NAME
+
+# List files in an archive
+borg list ::ARCHIVE_NAME | head -50
+
+# Restore specific files
+borg extract ::ARCHIVE_NAME path/to/file --target /tmp/restored
+
+# Restore entire archive
+borg extract ::ARCHIVE_NAME --target /tmp/full-restore
+
+# Check repository integrity
+borg check
+
+# Show repository size
+du -sh "$BORG_REPO"
+
+# Check cloud backup
+rclone ls "$RCLONE_DEST" | head -20
+rclone size "$RCLONE_DEST"
+
+# Run backup manually
+/root/borg-backup.sh
+
+# Run restore test manually
+/root/borg-test-restore.sh
+
+# Check when last backup succeeded
+cat /var/log/borg-backup-last-success
+
+# Check when last restore test ran
+cat /var/log/borg-test-restore-last
+
+# View backup log
+tail -100 /var/log/borg-backup.log
 ```
 
-### Managing the Systemd Timer
+## Monitoring
+
+### Is the backup running?
 
 ```bash
-# Check when the next backup will run
-systemctl list-timers restic-backup.timer
+# Check timer status
+systemctl list-timers borg-*
 
-# View status of the last backup run
-systemctl status restic-backup.service
+# Check last run
+systemctl status borg-backup.service
 
-# View full logs
-journalctl -u restic-backup.service --no-pager -n 50
-
-# Trigger a manual backup right now
-systemctl start restic-backup.service
-
-# Temporarily disable scheduled backups
-systemctl stop restic-backup.timer
-systemctl disable restic-backup.timer
-
-# Re-enable
-systemctl enable --now restic-backup.timer
-
-# Change the schedule (edit, then reload)
-systemctl edit restic-backup.timer   # creates an override
-systemctl daemon-reload
+# Last success timestamp
+cat /var/log/borg-backup-last-success
 ```
 
-### Customizing the Timer Schedule
-
-Edit the `OnCalendar=` line in the `.timer` file. Examples:
-
-```ini
-OnCalendar=*-*-* 03:00:00          # Daily at 3:00 AM (default)
-OnCalendar=*-*-* 03,15:00:00       # Twice daily at 3:00 AM and 3:00 PM
-OnCalendar=Mon *-*-* 03:00:00      # Weekly on Monday at 3:00 AM
-OnCalendar=hourly                   # Every hour
-OnCalendar=*-*-* *:00/30:00        # Every 30 minutes
-```
-
-After changing, run:
-```bash
-systemctl daemon-reload
-systemctl restart restic-backup.timer
-```
-
-### Switching from Cron to Systemd (or vice versa)
+### Something went wrong?
 
 ```bash
-# ── Remove cron, add systemd ──
-crontab -l | grep -v "restic-backup" | crontab -
-cp systemd/restic-backup.service /etc/systemd/system/
-cp systemd/restic-backup.timer   /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now restic-backup.timer
+# Check service logs
+journalctl -u borg-backup.service --since "24 hours ago"
 
-# ── Remove systemd, add cron ──
-systemctl disable --now restic-backup.timer
-rm /etc/systemd/system/restic-backup.{service,timer}
-systemctl daemon-reload
-echo "0 3 * * * /root/restic-backup.sh" | crontab -
+# Check backup log
+tail -200 /var/log/borg-backup.log
+
+# Verify borg repo
+source /root/.backup-secrets.env && export BORG_REPO BORG_PASSPHRASE
+borg check
 ```
 
----
+## Uninstall / Return to Clean System
 
-## Security Notes
+To completely remove the backup system and all its data:
 
-- Secrets file has `chmod 600` (owner-read only)
-- `RESTIC_PASSWORD` encrypts all data — **store it in a password manager**
-- R2 API tokens should be scoped to the specific bucket
-- Google Drive: rclone config is stored in `~/.config/rclone/rclone.conf`
-- Consider backing up your secrets to a **separate** secure location (password manager, encrypted USB)
+```bash
+sudo /root/borg-uninstall.sh
+```
 
----
+This interactively removes:
+1. Systemd timers and services
+2. Local borg repository (with confirmation)
+3. Cloud backup data (with confirmation)
+4. rclone remote configuration
+5. Config file, scripts, logs
+6. Optionally: borgbackup and rclone packages
+
+See also: [disaster-recovery.md](disaster-recovery.md) for full recovery procedures.
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| `restic: command not found` | Run `apt-get install -y restic` |
-| `Fatal: unable to open config` | Repository not initialized. Run `restic init` |
-| S3/R2 auth errors | Check `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` |
-| Google Drive auth errors | Run `rclone config reconnect gdrive:` |
-| Backup not running | Check `crontab -l` and `systemctl status cron` |
-| Systemd timer not firing | Check `systemctl list-timers` and `journalctl -u restic-backup.timer` |
-| Systemd service fails | Run `journalctl -u restic-backup.service -n 50` for details |
-| Gotify not sending | Verify `GOTIFY_URL` and `GOTIFY_TOKEN`; test with `curl` |
-| Large first backup | First backup uploads everything; subsequent ones are incremental |
-| `rclone` not found | Install: `curl https://rclone.org/install.sh \| bash` |
+### "Another backup is already running"
 
----
+The backup uses `flock` to prevent parallel runs. If a previous run crashed:
 
-## R2 vs Google Drive — Which to Choose?
+```bash
+rm -f /var/lock/borg-backup.lock
+```
 
-| Criteria | Cloudflare R2 | Google Drive |
-|----------|--------------|--------------|
-| **Free tier** | 10 GB/month storage, 10M reads | 15 GB total |
-| **Egress** | Always free | Free (via rclone) |
-| **Speed** | Fast (S3 protocol) | Moderate (rclone overhead) |
-| **Reliability** | Enterprise-grade SLA | Consumer service |
-| **API limits** | Generous | 750 GB/day upload, quota limits |
-| **Setup difficulty** | Easy (S3 compatible) | Easy (rclone wizard) |
-| **Best for** | Production, large data | Personal projects, small data |
+### "Repository does not exist" or "Failed to open repository"
 
-> 💡 **Tip**: You can use **both** backends simultaneously for extra redundancy. Just set up both cron jobs — they are completely independent.
+```bash
+# Verify repo path
+ls -la /var/backups/borg/
 
----
+# Re-check environment
+source /root/.backup-secrets.env
+echo "$BORG_REPO"  # Should print the correct path
+```
+
+### rclone sync fails
+
+```bash
+# Test rclone connectivity
+rclone lsd r2:  # List buckets (R2)
+rclone lsd gdrive:  # List folders (Google Drive)
+
+# Verbose sync
+rclone sync /var/backups/borg r2:borg-backup -v
+```
+
+### Backup is too large / growing unexpectedly
+
+Check what's being backed up:
+
+```bash
+source /root/.backup-secrets.env && export BORG_REPO BORG_PASSPHRASE
+borg list ::LATEST_ARCHIVE --sort-by size --last 50
+```
+
+Add patterns to `BACKUP_EXCLUDES` in your env file to exclude large/unnecessary files.
+
+### Gotify notifications not working
+
+```bash
+# Test manually
+curl "${GOTIFY_URL}/message?token=${GOTIFY_TOKEN}" \
+  -F "title=Test" -F "message=Hello" -F "priority=5"
+```
 
 ## License
 
-MIT — use freely for your own infrastructure.
+MIT

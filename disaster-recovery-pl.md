@@ -1,363 +1,420 @@
-# Disaster Recovery — Przewodnik Odtwarzania Danych
+# Przewodnik Odtwarzania po Awarii
 
-> **Dla kogo jest ten dokument?**
-> Dla osoby, która nigdy nie zajmowała się backupami i musi odtworzyć serwer po awarii.
-> Czytaj krok po kroku. Nie pomijaj żadnego kroku.
+**Napisany dla osób nietechnicznych.** Wykonuj kroki dokładnie tak, jak pokazano.
 
 ---
 
-## Zanim zaczniesz — co musisz mieć pod ręką
+## Spis treści
 
-Przed przystąpieniem do odtwarzania upewnij się, że masz dostęp do:
-
-- [ ] Pliku `/root/.backup-secrets.env` (lub jego kopii zapisanej w menedżerze haseł)
-- [ ] Hasła do repozytorium restic (pole `RESTIC_PASSWORD` z pliku powyżej)
-- [ ] Dostępu do panelu Cloudflare (jako weryfikacja, że dane są tam obecne)
-- [ ] Nowego lub odtworzonego serwera z Ubuntu
-
----
-
-## Słownik — co oznaczają pojęcia
-
-| Słowo | Co to znaczy po ludzku |
-|---|---|
-| **Restic** | Program, który robił kopie zapasowe. Teraz będzie je odtwarzał. |
-| **Snapshot** | Jedna kopia z konkretnego dnia, jak "zdjęcie" serwera w czasie. |
-| **Repository** | Miejsce na Cloudflare R2, gdzie przechowywane są wszystkie snapshoty. |
-| **R2** | Cloudflare R2 — usługa w chmurze, gdzie fizycznie siedzą dane. |
-| **Restore** | Odtworzenie — skopiowanie danych z backupu z powrotem na serwer. |
+1. [Słowniczek — Co oznaczają te słowa](#1-słowniczek)
+2. [Jak sprawdzić czy backupy działają](#2-jak-sprawdzić-czy-backupy-działają)
+3. [Scenariusz A — Przypadkowo usunąłem pliki](#3-scenariusz-a--przypadkowo-usunąłem-pliki)
+4. [Scenariusz B — Dysk serwera uległ awarii](#4-scenariusz-b--dysk-serwera-uległ-awarii)
+5. [Scenariusz C — Serwer został zhakowany](#5-scenariusz-c--serwer-został-zhakowany)
+6. [Scenariusz D — VPS został usunięty / Start od zera](#6-scenariusz-d--vps-został-usunięty--start-od-zera)
+7. [Jak usunąć wszystko i wrócić do czystego systemu](#7-jak-usunąć-wszystko)
+8. [Ważne ścieżki i pliki](#8-ważne-ścieżki-i-pliki)
+9. [Co musisz mieć zapisane](#9-co-musisz-mieć-zapisane)
+10. [Kontakty](#10-kontakty)
 
 ---
 
-## CZĘŚĆ 1 — Sprawdzenie czy backup w ogóle działa (weryfikacja)
+## 1. Słowniczek
 
-> Wykonaj te kroki gdy **nie ma awarii** — raz w miesiącu, żeby mieć pewność.
-
-### Krok 1.1 — Zaloguj się na serwer
-
-```bash
-ssh root@ADRES_SERWERA
-```
-
-### Krok 1.2 — Załaduj konfigurację
-
-```bash
-source /root/.backup-secrets.env
-```
-
-Jeśli to polecenie zwróci błąd, plik sekretów nie istnieje — przejdź do Części 3.
-
-### Krok 1.3 — Wyświetl listę kopii zapasowych
-
-```bash
-restic snapshots
-```
-
-Powinieneś zobaczyć tabelkę podobną do tej:
-
-```
-ID        Time                 Host         Paths
--------------------------------------------------------
-a1b2c3d4  2025-01-15 03:00:12  moj-serwer   /var/lib/docker/volumes
-e5f6g7h8  2025-01-14 03:00:08  moj-serwer   /var/lib/docker/volumes
-```
-
-Każdy wiersz to jedna kopia z jednego dnia. **Jeśli lista jest pusta — backup nie działa.**
-
-### Krok 1.4 — Sprawdź integralność danych
-
-```bash
-restic check
-```
-
-Na końcu powinno pojawić się: `no errors were found`. Cokolwiek innego — skontaktuj się z administratorem.
+| Termin | Co to znaczy |
+|--------|-------------|
+| **BorgBackup (borg)** | Program tworzący backupy. Zapisuje pliki w specjalnym skompresowanym i zaszyfrowanym formacie. |
+| **Archiwum** | Jeden snapshot backupu. Jak zdjęcie wszystkich Twoich plików zrobione w konkretnym momencie. |
+| **Repozytorium (repo)** | Miejsce przechowywania wszystkich archiwów. Pomyśl o tym jak o folderze zawierającym wszystkie Twoje "zdjęcia" backupów. |
+| **rclone** | Program kopiujący repozytorium do chmury (Cloudflare R2 lub Google Drive). |
+| **R2** | Usługa przechowywania w chmurze Cloudflare, gdzie znajduje się kopia zapasowa Twoich backupów. |
+| **Passphrase (hasło)** | Hasło szyfrujące Twoje backupy. Bez niego nikt (włącznie z Tobą) nie może ich odczytać. |
+| **Klucz borg** | Specjalny plik klucza używany razem z hasłem do odblokowania backupów. Musisz mieć OBYDWA. |
 
 ---
 
-## CZĘŚĆ 2 — Odtwarzanie po awarii (Disaster Recovery)
+## 2. Jak sprawdzić czy backupy działają
 
-### Scenariusz A — Serwer działa, ale skasowałem/nadpisałem pliki
-
-To najprostszy przypadek. Serwer stoi, restic jest zainstalowany.
-
-#### Krok A.1 — Załaduj konfigurację
+### Szybka kontrola (30 sekund)
 
 ```bash
-source /root/.backup-secrets.env
+# Kiedy był ostatni udany backup?
+cat /var/log/borg-backup-last-success
 ```
 
-#### Krok A.2 — Znajdź właściwy snapshot
+Jeśli data jest dzisiejsza lub wczorajsza, backupy działają.
+
+### Szczegółowa kontrola
 
 ```bash
-restic snapshots
+# Czy timery są aktywne?
+systemctl list-timers borg-*
+
+# Jaki był wynik ostatniego backupu?
+systemctl status borg-backup.service
+
+# Wylistuj wszystkie archiwa backupów
+source /root/.backup-secrets.env && export BORG_REPO BORG_PASSPHRASE
+borg list
 ```
 
-Zapamiętaj **ID** snapshotu z dnia, z którego chcesz odtworzyć (np. `a1b2c3d4`).
-Jeśli chcesz zawsze ostatni, możesz napisać `latest` zamiast konkretnego ID.
+### Miesięczny test odtwarzania
 
-#### Krok A.3 — Odtwórz konkretny folder lub plik
-
-Odtworzenie **jednego katalogu** do jego oryginalnej lokalizacji:
+System automatycznie testuje odtwarzanie 1-go dnia każdego miesiąca i wysyła powiadomienie Gotify. Sprawdź:
 
 ```bash
-restic restore latest \
-  --target / \
-  --include /home/pavlojs/apps
+cat /var/log/borg-test-restore-last
 ```
-
-Odtworzenie **konkretnego pliku** (np. bazy danych):
-
-```bash
-restic restore latest \
-  --target /tmp/odtworzone \
-  --include /var/lib/docker/volumes/moj-kontener/_data/database.db
-```
-
-Plik pojawi się w `/tmp/odtworzone/` — możesz go sprawdzić przed przeniesieniem na właściwe miejsce.
-
-#### Krok A.4 — Odtworzenie wszystkiego
-
-```bash
-restic restore latest --target /
-```
-
-> ⚠️ **Uwaga:** To nadpisze istniejące pliki ich wersjami z backupu. Upewnij się, że tego chcesz.
 
 ---
 
-### Scenariusz B — Serwer całkowicie padł, stawiam nowy
+## 3. Scenariusz A — Przypadkowo usunąłem pliki
 
-#### Krok B.1 — Zainstaluj system i podstawowe narzędzia
+**Sytuacja**: Serwer działa normalnie, ale przez pomyłkę usunąłeś jakieś pliki.
 
-Na świeżym Ubuntu:
+### Krok 1: Znajdź archiwum z Twoimi plikami
 
 ```bash
-apt-get update && apt-get install -y restic
+# Załaduj dane dostępowe
+source /root/.backup-secrets.env && export BORG_REPO BORG_PASSPHRASE
+
+# Wylistuj wszystkie archiwa (najnowsze na końcu)
+borg list
 ```
 
-#### Krok B.2 — Odtwórz plik sekretów
+Zobaczysz coś takiego:
 
-Musisz ręcznie stworzyć plik `/root/.backup-secrets.env` z danymi, które miałeś zapisane w bezpiecznym miejscu:
+```
+myserver-2026-04-08T03:00    Mon, 2026-04-08 03:00:15
+myserver-2026-04-09T03:00    Tue, 2026-04-09 03:00:12
+myserver-2026-04-10T03:00    Wed, 2026-04-10 03:00:18
+```
+
+### Krok 2: Zobacz co jest w archiwum
+
+```bash
+# Wylistuj pliki w najnowszym archiwum
+borg list ::myserver-2026-04-10T03:00 | grep "szukany-plik"
+```
+
+### Krok 3a: Przywróć konkretne pliki
+
+```bash
+# Przywróć konkretny plik do tymczasowej lokalizacji
+borg extract ::myserver-2026-04-10T03:00 var/lib/docker/volumes/myapp/data/wazny-plik.txt \
+    --target /tmp/restored
+
+# Sprawdź plik
+ls -la /tmp/restored/var/lib/docker/volumes/myapp/data/wazny-plik.txt
+
+# Skopiuj z powrotem na właściwe miejsce
+cp /tmp/restored/var/lib/docker/volumes/myapp/data/wazny-plik.txt \
+   /var/lib/docker/volumes/myapp/data/wazny-plik.txt
+```
+
+### Krok 3b: Przywróć cały katalog
+
+```bash
+# Przywróć cały volume Dockera
+borg extract ::myserver-2026-04-10T03:00 var/lib/docker/volumes/myapp \
+    --target /tmp/restored
+
+# Skopiuj z powrotem
+cp -a /tmp/restored/var/lib/docker/volumes/myapp/* /var/lib/docker/volumes/myapp/
+```
+
+### Krok 4: Posprzątaj
+
+```bash
+rm -rf /tmp/restored
+```
+
+### Krok 5: Zrestartuj kontenery
+
+```bash
+docker restart myapp
+```
+
+---
+
+## 4. Scenariusz B — Dysk serwera uległ awarii
+
+**Sytuacja**: Serwer działa, ale dysk z danymi jest uszkodzony lub wymieniony. Lokalne repozytorium borg może być zniszczone, ale kopia w chmurze jest bezpieczna.
+
+### Krok 1: Przywróć repozytorium borg z chmury
+
+```bash
+# Zainstaluj narzędzia (jeśli jeszcze nie zainstalowane)
+apt-get update && apt-get install -y borgbackup rclone
+
+# Odtwórz plik sekretów z menedżera haseł
+nano /root/.backup-secrets.env
+# (Wklej zawartość zapisaną w menedżerze haseł)
+chmod 600 /root/.backup-secrets.env
+
+# Załaduj dane dostępowe
+source /root/.backup-secrets.env && export BORG_REPO BORG_PASSPHRASE
+```
+
+Skonfiguruj rclone (dla R2):
+
+```bash
+rclone config create r2 s3 \
+    provider=Cloudflare \
+    access_key_id="$R2_ACCESS_KEY_ID" \
+    secret_access_key="$R2_SECRET_ACCESS_KEY" \
+    endpoint="$R2_ENDPOINT" \
+    acl=private \
+    no_check_bucket=true
+```
+
+Pobierz repozytorium:
+
+```bash
+mkdir -p "$BORG_REPO"
+rclone sync "$RCLONE_DEST" "$BORG_REPO" --progress
+```
+
+### Krok 2: Zaimportuj klucz borg (jeśli potrzebne)
+
+Jeśli klucz borg przepadł razem z dyskiem:
+
+```bash
+# Użyj klucza zapisanego w menedżerze haseł
+borg key import :: /sciezka/do/zapisanego-klucza
+# LUB wklej interaktywnie:
+borg key import :: -
+# (wklej klucz, potem Ctrl+D)
+```
+
+### Krok 3: Zweryfikuj i przywróć
+
+```bash
+# Zweryfikuj repozytorium
+borg check
+
+# Wylistuj archiwa
+borg list
+
+# Przywróć wszystko
+borg extract ::NAJNOWSZE_ARCHIWUM --target /
+```
+
+### Krok 4: Zrestartuj usługi
+
+```bash
+# Zrestartuj kontenery Dockera
+docker restart $(docker ps -q)
+
+# Lub uruchom konkretne stacki compose
+cd /home/user/apps/mystack && docker compose up -d
+```
+
+---
+
+## 5. Scenariusz C — Serwer został zhakowany
+
+**Sytuacja**: Serwer został skompromitowany. Musisz zacząć od nowa i przywrócić dane z backupów.
+
+> ⚠️ **WAŻNE**: NIE przywracaj z lokalnego repozytorium borg — mogło zostać zmodyfikowane przez atakującego. Przywracaj TYLKO z kopii w chmurze (R2 / Google Drive).
+
+### Krok 1: Przygotuj nowy serwer
+
+Zamów nowy VPS (u tego samego lub innego dostawcy — nie ma znaczenia). Zainstaluj Ubuntu 22.04 lub nowszy.
+
+### Krok 2: Zainstaluj narzędzia
+
+```bash
+apt-get update
+apt-get install -y borgbackup curl
+curl -fsSL https://rclone.org/install.sh | bash
+```
+
+### Krok 3: Odtwórz sekrety
+
+Z **menedżera haseł** pobierz:
+- Zawartość `.backup-secrets.env`
+- Klucz repozytorium borg
+- Hasło (passphrase) borg
 
 ```bash
 nano /root/.backup-secrets.env
-```
-
-Wklej zawartość (patrz szablon w tym repozytorium: `backup-secrets.env.template`) i uzupełnij prawdziwe wartości.
-
-```bash
+# (wklej zapisaną konfigurację)
 chmod 600 /root/.backup-secrets.env
-source /root/.backup-secrets.env
+source /root/.backup-secrets.env && export BORG_REPO BORG_PASSPHRASE
 ```
 
-#### Krok B.3 — Zweryfikuj dostęp do backupu
+### Krok 4: Skonfiguruj rclone i pobierz dane
+
+Dla R2:
 
 ```bash
-restic snapshots
+rclone config create r2 s3 \
+    provider=Cloudflare \
+    access_key_id="$R2_ACCESS_KEY_ID" \
+    secret_access_key="$R2_SECRET_ACCESS_KEY" \
+    endpoint="$R2_ENDPOINT" \
+    acl=private \
+    no_check_bucket=true
+
+mkdir -p "$BORG_REPO"
+rclone sync "$RCLONE_DEST" "$BORG_REPO" --progress
 ```
 
-Jeśli widzisz listę snapshotów — dane są bezpieczne i gotowe do odtworzenia.
-
-#### Krok B.4 — Odtwórz dane
+Dla Google Drive:
 
 ```bash
-restic restore latest --target /
+rclone config  # Skonfiguruj remote "gdrive" interaktywnie
+
+mkdir -p "$BORG_REPO"
+rclone sync "${RCLONE_REMOTE}:${RCLONE_GDRIVE_FOLDER}" "$BORG_REPO" --progress
 ```
 
-#### Krok B.5 — Uruchom Dockera i kontenery
+### Krok 5: Zaimportuj klucz borg
 
 ```bash
-apt-get install -y docker.io docker-compose
-cd /home/pavlojs/apps
-docker-compose up -d
+borg key import :: -
+# (wklej klucz z menedżera haseł, potem Ctrl+D)
 ```
 
-#### Krok B.6 — Zainstaluj ponownie skrypt backupu
+### Krok 6: Zweryfikuj repozytorium
 
 ```bash
-cp /home/pavlojs/apps/backup/restic-backup.sh /root/restic-backup.sh
-chmod 700 /root/restic-backup.sh
+borg check
+borg list
 ```
 
-Wybierz **jedną** z opcji schedulowania:
+### Krok 7: Przywróć dane
 
-**Opcja A — Cron:**
 ```bash
-(crontab -l 2>/dev/null; echo "0 3 * * * /root/restic-backup.sh") | crontab -
+# Przywróć volume'y Dockera i dane aplikacji
+borg extract ::NAJNOWSZE_ARCHIWUM --target /
 ```
 
-**Opcja B — Systemd timer:**
+### Krok 8: Zainstaluj Dockera i uruchom usługi
+
 ```bash
-cp /home/pavlojs/apps/backup/systemd/restic-backup.service /etc/systemd/system/
-cp /home/pavlojs/apps/backup/systemd/restic-backup.timer   /etc/systemd/system/
+# Zainstaluj Dockera
+curl -fsSL https://get.docker.com | bash
+
+# Uruchom usługi
+cd /home/user/apps/mystack && docker compose up -d
+```
+
+### Krok 9: Zainstaluj ponownie system backupu
+
+```bash
+git clone https://github.com/pavlojs/flex-backup-system.git
+cd flex-backup-system
+bash borg-setup.sh  # Lub borg-setup-gdrive.sh
+```
+
+### Krok 10: Zmień WSZYSTKIE dane dostępowe
+
+Po włamaniu **zmień wszystko**:
+- Klucze API R2 (panel Cloudflare)
+- Hasło borg (`borg key change-passphrase`)
+- Token Gotify
+- Wszystkie hasła aplikacji
+- Klucze SSH
+
+---
+
+## 6. Scenariusz D — VPS został usunięty / Start od zera
+
+**Sytuacja**: VPS nie istnieje. Zaczynasz na zupełnie nowym, pustym serwerze.
+
+Wykonaj dokładnie **Scenariusz C** — kroki są identyczne. Jedyna różnica: nie musisz się martwić o skompromitowane dane.
+
+---
+
+## 7. Jak usunąć wszystko
+
+Aby całkowicie usunąć system backupu i wrócić do czystego systemu:
+
+```bash
+sudo /root/borg-uninstall.sh
+```
+
+Skrypt interaktywnie zapyta o potwierdzenie:
+- Zatrzymanie timerów systemd
+- Usunięcie lokalnego repozytorium borg
+- Usunięcie danych z chmury (R2 / Google Drive)
+- Usunięcie plików konfiguracyjnych, skryptów, logów
+- Opcjonalne odinstalowanie borgbackup i rclone
+
+Po uruchomieniu serwer nie będzie miał zainstalowanego systemu backupu.
+
+### Ręczne usuwanie (jeśli skrypt uninstall jest niedostępny)
+
+```bash
+# Zatrzymaj timery
+systemctl stop borg-backup.timer borg-test-restore.timer
+systemctl disable borg-backup.timer borg-test-restore.timer
+
+# Usuń pliki systemd
+rm -f /etc/systemd/system/borg-backup.{service,timer}
+rm -f /etc/systemd/system/borg-test-restore.{service,timer}
 systemctl daemon-reload
-systemctl enable --now restic-backup.timer
 
-# Sprawdź czy timer jest aktywny:
-systemctl list-timers restic-backup.timer
-```
+# Usuń lokalne repozytorium (UWAGA — usuwa wszystkie lokalne backupy!)
+rm -rf /var/backups/borg
 
----
-
-## CZĘŚĆ 3 — Gdy coś nie działa — diagnostyka
-
-### Problem: `source /root/.backup-secrets.env` zwraca błąd "No such file"
-
-Plik sekretów zaginął. Musisz go odtworzyć z kopii (menedżer haseł, inny serwer).
-Bez tego pliku **nie możesz odtworzyć danych** — dlatego trzymaj go w co najmniej dwóch miejscach.
-
-### Problem: `restic snapshots` zwraca błąd autoryzacji
-
-Prawdopodobna przyczyna: zmienił się klucz API w Cloudflare lub token wygasł.
-
-1. Zaloguj się do [dash.cloudflare.com](https://dash.cloudflare.com)
-2. Przejdź do **R2 → Manage R2 API Tokens**
-3. Utwórz nowy token z uprawnieniami `Object Read & Write`
-4. Zaktualizuj `/root/.backup-secrets.env`
-
-### Problem: `restic check` wykazuje błędy
-
-```bash
-restic rebuild-index
-restic check
-```
-
-Jeśli błędy nadal są, uruchom:
-
-```bash
-restic repair snapshots --forget
-```
-
-### Problem: Backup od kilku dni nie działa (brak powiadomień Gotify)
-
-Sprawdź log:
-
-```bash
-tail -50 /var/log/restic-backup.log
-```
-
-Sprawdź czy cron lub systemd timer działa:
-
-```bash
-# Jeśli używasz crona:
-crontab -l
-systemctl status cron
-
-# Jeśli używasz systemd timer:
-systemctl list-timers restic-backup.timer
-systemctl status restic-backup.service
-journalctl -u restic-backup.service -n 50
-```
-
-Uruchom ręcznie:
-
-```bash
-# Cron / bezpośrednio:
-/root/restic-backup.sh
-
-# Systemd:
-systemctl start restic-backup.service
-```
-
----
-
-## CZĘŚĆ 4 — Harmonogram backupów
-
-| Typ | Ile przechowywane | Co to znaczy |
-|---|---|---|
-| Dzienne | 5 ostatnich dni | Możesz cofnąć się o max 5 dni |
-| Tygodniowe | 1 (ostatni tydzień) | Jedna kopia z poprzedniego tygodnia |
-| Miesięczne | 1 (ostatni miesiąc) | Jedna kopia z poprzedniego miesiąca |
-
-> Backup uruchamia się automatycznie **codziennie o 3:00 w nocy**.
-> Po każdym udanym lub nieudanym backupie przychodzi powiadomienie na Gotify.
-
----
-
-## CZĘŚĆ 5 — Ważne ścieżki i pliki
-
-| Co | Gdzie |
-|---|---|
-| Skrypt backupu (R2) | `/root/restic-backup.sh` |
-| Skrypt backupu (Google Drive) | `/root/restic-backup-gdrive.sh` |
-| Plik sekretów (R2) | `/root/.backup-secrets.env` |
-| Plik sekretów (Google Drive) | `/root/.backup-secrets-gdrive.env` |
-| Log backupu (R2) | `/var/log/restic-backup.log` |
-| Log backupu (Google Drive) | `/var/log/restic-backup-gdrive.log` |
-| Systemd service (R2) | `/etc/systemd/system/restic-backup.service` |
-| Systemd timer (R2) | `/etc/systemd/system/restic-backup.timer` |
-| Systemd service (Google Drive) | `/etc/systemd/system/restic-backup-gdrive.service` |
-| Systemd timer (Google Drive) | `/etc/systemd/system/restic-backup-gdrive.timer` |
-| Rclone config | `~/.config/rclone/rclone.conf` |
-| Dane Docker | `/var/lib/docker/volumes` |
-| Aplikacje | `/home/pavlojs/apps` |
-
----
-
-## CZĘŚĆ 6 — Kontakty i eskalacja
-
-> Uzupełnij tę sekcję własnymi danymi.
-
-| Rola | Imię | Kontakt |
-|---|---|---|
-| Administrator serwera | | |
-| Właściciel konta Cloudflare | | |
-| Backup kontakt (gdy admin niedostępny) | | |
-
----
-
-## CZĘŚĆ 7 — Google Drive Backend (opcjonalnie)
-
-> Jeśli backup korzysta z Google Drive zamiast (lub oprócz) Cloudflare R2.
-
-### Plik sekretów Google Drive
-
-Plik: `/root/.backup-secrets-gdrive.env`
-
-Skrypt: `/root/restic-backup-gdrive.sh`
-
-Log: `/var/log/restic-backup-gdrive.log`
-
-### Odtwarzanie z Google Drive
-
-Procedura jest **identyczna** jak dla R2. Jedyna różnica to plik sekretów:
-
-```bash
-# Zamiast:
+# Usuń dane z chmury (UWAGA — usuwa wszystkie backupy w chmurze!)
 source /root/.backup-secrets.env
+rclone purge "$RCLONE_DEST"
 
-# Użyj:
-source /root/.backup-secrets-gdrive.env
-```
+# Usuń skrypty i konfigurację
+rm -f /root/borg-backup.sh /root/borg-test-restore.sh /root/borg-uninstall.sh
+rm -f /root/.backup-secrets.env
+rm -f /var/log/borg-backup.log /var/log/borg-backup-last-success /var/log/borg-test-restore-last
+rm -f /var/lock/borg-backup.lock
+rm -f /etc/logrotate.d/borg-backup
 
-Reszta komend restic (`snapshots`, `restore`, `check`) działa tak samo.
-
-### Problem: Rclone nie łączy się z Google Drive
-
-Odśwież autoryzację:
-
-```bash
-rclone config reconnect gdrive:
-```
-
-Na serwerze bez przeglądarki:
-1. Na komputerze z przeglądarką uruchom: `rclone authorize "drive"`
-2. Zaloguj się do Google
-3. Skopiuj token z powrotem na serwer
-
-### Problem: `RESTIC_REPOSITORY` wskazuje na rclone, ale rclone nie jest zainstalowany
-
-```bash
-curl https://rclone.org/install.sh | bash
-```
-
-Sprawdź konfigurację:
-
-```bash
-rclone listremotes
-rclone lsd gdrive:restic-backup
+# Opcjonalne usunięcie pakietów
+apt-get remove -y borgbackup rclone
 ```
 
 ---
 
-*Dokument wygenerowany automatycznie. Ostatnia aktualizacja konfiguracji: sprawdź datę ostatniego snapshotu (`restic snapshots`).*
+## 8. Ważne ścieżki i pliki
+
+| Ścieżka | Opis |
+|---------|------|
+| `/root/.backup-secrets.env` | Cała konfiguracja i dane dostępowe |
+| `/var/backups/borg/` | Lokalne repozytorium borg (wszystkie dane backupu) |
+| `/root/borg-backup.sh` | Główny skrypt backupu |
+| `/root/borg-test-restore.sh` | Skrypt miesięcznego testu odtwarzania |
+| `/root/borg-uninstall.sh` | Skrypt usuwania |
+| `/var/log/borg-backup.log` | Plik logu backupu |
+| `/var/log/borg-backup-last-success` | Czas ostatniego udanego backupu |
+| `/var/log/borg-test-restore-last` | Czas ostatniego testu odtwarzania |
+| `/etc/systemd/system/borg-backup.*` | Usługa i timer systemd |
+| `/etc/systemd/system/borg-test-restore.*` | Jednostki systemd testu odtwarzania |
+
+---
+
+## 9. Co musisz mieć zapisane
+
+Aby odzyskać dane po całkowitej utracie, potrzebujesz **trzech rzeczy** zapisanych w menedżerze haseł:
+
+| Element | Dlaczego jest potrzebny | Jak go uzyskać |
+|---------|------------------------|----------------|
+| **Hasło borg (passphrase)** | Odszyfrowuje wszystkie dane backupu | Z pliku `.backup-secrets.env` |
+| **Klucz repozytorium borg** | Wymagany razem z hasłem | `borg key export ::` (wykonane podczas setup) |
+| **Zawartość `.backup-secrets.env`** | Dane dostępowe R2/GDrive, konfiguracja backupu | Skopiuj z `/root/.backup-secrets.env` |
+
+> ⚠️ Jeśli stracisz hasło LUB klucz, Twoje backupy **nie mogą zostać odzyskane**. Nie ma opcji resetu ani odzyskiwania. Zapisz obydwa w co najmniej dwóch miejscach.
+
+---
+
+## 10. Kontakty
+
+| Rola | Kontakt |
+|------|---------|
+| Administrator systemu | *(wpisz swój kontakt)* |
+| Odpowiedzialny za backupy | *(wpisz swój kontakt)* |
+
+---
+
+*Ostatnia aktualizacja: kwiecień 2026*
