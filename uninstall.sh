@@ -64,7 +64,7 @@ fi
 # Step 1: Stop and disable systemd timers/services
 # ---------------------------------------------------------------------------
 info "Stopping systemd timers and services..."
-for unit in borg-backup.timer borg-backup.service borg-test-restore.timer borg-test-restore.service; do
+for unit in backup.timer backup.service test-restore.timer test-restore.service; do
     if systemctl is-active "$unit" &>/dev/null || systemctl is-enabled "$unit" &>/dev/null; then
         systemctl stop "$unit" 2>/dev/null || true
         systemctl disable "$unit" 2>/dev/null || true
@@ -77,7 +77,7 @@ done
 # Step 2: Remove systemd unit files
 # ---------------------------------------------------------------------------
 info "Removing systemd unit files..."
-for unit in borg-backup.service borg-backup.timer borg-test-restore.service borg-test-restore.timer; do
+for unit in backup.service backup.timer test-restore.service test-restore.timer; do
     if [[ -f "/etc/systemd/system/$unit" ]]; then
         rm -f "/etc/systemd/system/$unit"
         REMOVED+=("file: /etc/systemd/system/$unit")
@@ -168,7 +168,7 @@ fi
 # Step 7: Remove scripts
 # ---------------------------------------------------------------------------
 info "Removing backup scripts..."
-for script in borg-backup.sh borg-test-restore.sh borg-uninstall.sh; do
+for script in backup.sh test-restore.sh uninstall.sh; do
     if [[ -f "$INSTALL_DIR/$script" ]]; then
         rm -f "$INSTALL_DIR/$script"
         REMOVED+=("script: $INSTALL_DIR/$script")
@@ -180,10 +180,10 @@ ok "Scripts removed"
 # Step 8: Remove logs and stamp files
 # ---------------------------------------------------------------------------
 info "Removing logs and state files..."
-for f in /var/log/borg-backup.log /var/log/borg-backup-last-success /var/log/borg-test-restore-last /var/lock/borg-backup.lock; do
+for f in /var/log/backup.log /var/log/backup-last-success /var/log/test-restore-last /var/lock/backup.lock; do
     [[ -f "$f" ]] && rm -f "$f" && REMOVED+=("log: $f")
 done
-[[ -f /etc/logrotate.d/borg-backup ]] && rm -f /etc/logrotate.d/borg-backup && REMOVED+=("logrotate: /etc/logrotate.d/borg-backup")
+[[ -f /etc/logrotate.d/backup ]] && rm -f /etc/logrotate.d/backup && REMOVED+=("logrotate: /etc/logrotate.d/backup")
 ok "Logs and state files removed"
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 [Unit]
-Description=Monthly BorgBackup restore verification
+Description=BorgBackup + rclone sync to cloud
 Documentation=https://github.com/pavlojs/flex-backup-system
 After=network-online.target
 Wants=network-online.target
@@ -7,9 +7,9 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=/root/.backup-secrets.env
-ExecStart=/root/borg-test-restore.sh
+ExecStart=/root/backup.sh
 
-# Resource limits
+# Resource limits — don't starve other services
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
@@ -20,7 +20,7 @@ PrivateTmp=true
 ProtectSystem=full
 NoNewPrivileges=true
 ProtectHome=false
-ReadWritePaths=/var/log /var/backups /tmp /root
+ReadWritePaths=/var/log /var/backups /var/lock /root
 
 [Install]
 WantedBy=multi-user.target

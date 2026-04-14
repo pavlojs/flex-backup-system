@@ -12,9 +12,9 @@ set -uo pipefail
 # Configuration
 # ---------------------------------------------------------------------------
 ENV_FILE="${BACKUP_ENV_FILE:-/root/.backup-secrets.env}"
-RESTORE_DIR="/tmp/borg-test-restore"
-LOG_FILE="/var/log/borg-backup.log"
-STAMP_FILE="/var/log/borg-test-restore-last"
+RESTORE_DIR="/tmp/test-restore"
+LOG_FILE="/var/log/backup.log"
+STAMP_FILE="/var/log/test-restore-last"
 
 # ---------------------------------------------------------------------------
 # Logging

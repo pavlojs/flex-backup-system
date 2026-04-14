@@ -26,18 +26,18 @@ Docker volumes / app data
 ## Project Structure
 
 ```
-├── borg-backup.sh                  # Main backup script (borg + prune + rclone sync)
-├── borg-test-restore.sh            # Monthly restore verification
-├── borg-setup.sh                   # One-time setup (Cloudflare R2)
-├── borg-setup-gdrive.sh            # One-time setup (Google Drive)
-├── borg-uninstall.sh               # Complete removal of backup system
+├── backup.sh                  # Main backup script (borg + prune + rclone sync)
+├── test-restore.sh            # Monthly restore verification
+├── setup.sh                   # One-time setup (Cloudflare R2)
+├── setup-gdrive.sh            # One-time setup (Google Drive)
+├── uninstall.sh               # Complete removal of backup system
 ├── backup-secrets.env.template     # Config template (R2)
 ├── backup-secrets-gdrive.env.template  # Config template (Google Drive)
 ├── systemd/
-│   ├── borg-backup.service         # Backup service unit
-│   ├── borg-backup.timer           # Daily timer (03:00)
-│   ├── borg-test-restore.service   # Restore test service unit
-│   └── borg-test-restore.timer     # Monthly timer (1st at 04:00)
+│   ├── backup.service         # Backup service unit
+│   ├── backup.timer           # Daily timer (03:00)
+│   ├── test-restore.service   # Restore test service unit
+│   └── test-restore.timer     # Monthly timer (1st at 04:00)
 ├── disaster-recovery.md            # Step-by-step recovery guide (English)
 ├── disaster-recovery-pl.md         # Step-by-step recovery guide (Polish)
 ├── SECURITY.md                     # Security model documentation
@@ -65,7 +65,7 @@ cd flex-backup-system
 ### 2. Run the setup script
 
 ```bash
-sudo bash borg-setup.sh
+sudo bash setup.sh
 ```
 
 The setup will:
@@ -101,7 +101,7 @@ KEEP_MONTHLY=6
 systemctl list-timers borg-*
 
 # Run manually
-sudo /root/borg-backup.sh
+sudo /root/backup.sh
 
 # List archives
 sudo BORG_REPO=/var/backups/borg BORG_PASSPHRASE=<your-pass> borg list
@@ -110,7 +110,7 @@ sudo BORG_REPO=/var/backups/borg BORG_PASSPHRASE=<your-pass> borg list
 ## Quick Start — Google Drive
 
 ```bash
-sudo bash borg-setup-gdrive.sh
+sudo bash setup-gdrive.sh
 ```
 
 Same flow as R2, except:
@@ -207,7 +207,7 @@ Notifications are sent for:
 3. **borg prune** — remove archives outside retention policy
 4. **borg compact** — free disk space from pruned data
 5. **rclone sync** — upload only changed repository segments to cloud
-6. **Stamp** — write success timestamp to `/var/log/borg-backup-last-success`
+6. **Stamp** — write success timestamp to `/var/log/backup-last-success`
 7. **Notify** — Gotify push with stats (or error details on failure)
 
 ### Monthly Restore Test (1st of month, 04:00)
@@ -259,19 +259,19 @@ rclone ls "$RCLONE_DEST" | head -20
 rclone size "$RCLONE_DEST"
 
 # Run backup manually
-/root/borg-backup.sh
+/root/backup.sh
 
 # Run restore test manually
-/root/borg-test-restore.sh
+/root/test-restore.sh
 
 # Check when last backup succeeded
-cat /var/log/borg-backup-last-success
+cat /var/log/backup-last-success
 
 # Check when last restore test ran
-cat /var/log/borg-test-restore-last
+cat /var/log/test-restore-last
 
 # View backup log
-tail -100 /var/log/borg-backup.log
+tail -100 /var/log/backup.log
 ```
 
 ## Monitoring
@@ -283,20 +283,20 @@ tail -100 /var/log/borg-backup.log
 systemctl list-timers borg-*
 
 # Check last run
-systemctl status borg-backup.service
+systemctl status backup.service
 
 # Last success timestamp
-cat /var/log/borg-backup-last-success
+cat /var/log/backup-last-success
 ```
 
 ### Something went wrong?
 
 ```bash
 # Check service logs
-journalctl -u borg-backup.service --since "24 hours ago"
+journalctl -u backup.service --since "24 hours ago"
 
 # Check backup log
-tail -200 /var/log/borg-backup.log
+tail -200 /var/log/backup.log
 
 # Verify borg repo
 source /root/.backup-secrets.env && export BORG_REPO BORG_PASSPHRASE
@@ -308,7 +308,7 @@ borg check
 To completely remove the backup system and all its data:
 
 ```bash
-sudo /root/borg-uninstall.sh
+sudo /root/uninstall.sh
 ```
 
 This interactively removes:
@@ -328,7 +328,7 @@ See also: [disaster-recovery.md](disaster-recovery.md) for full recovery procedu
 The backup uses `flock` to prevent parallel runs. If a previous run crashed:
 
 ```bash
-rm -f /var/lock/borg-backup.lock
+rm -f /var/lock/backup.lock
 ```
 
 ### "Repository does not exist" or "Failed to open repository"

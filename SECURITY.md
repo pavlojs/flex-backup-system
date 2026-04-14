@@ -53,9 +53,9 @@ All credentials are stored in a single file: `/root/.backup-secrets.env`
 
 ```
 /root/.backup-secrets.env    600  root:root  (owner read/write only)
-/root/borg-backup.sh         700  root:root  (owner execute only)
-/root/borg-test-restore.sh   700  root:root
-/root/borg-uninstall.sh      700  root:root
+/root/backup.sh         700  root:root  (owner execute only)
+/root/test-restore.sh   700  root:root
+/root/uninstall.sh      700  root:root
 /var/backups/borg/            700  root:root  (borg repository)
 ```
 

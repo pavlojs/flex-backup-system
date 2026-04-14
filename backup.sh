@@ -11,9 +11,9 @@ set -uo pipefail
 # Configuration
 # ---------------------------------------------------------------------------
 ENV_FILE="${BACKUP_ENV_FILE:-/root/.backup-secrets.env}"
-LOCK_FILE="/var/lock/borg-backup.lock"
-LOG_FILE="/var/log/borg-backup.log"
-STAMP_FILE="/var/log/borg-backup-last-success"
+LOCK_FILE="/var/lock/backup.lock"
+LOG_FILE="/var/log/backup.log"
+STAMP_FILE="/var/log/backup-last-success"
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -65,7 +65,7 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------
 if [[ ! -f "$ENV_FILE" ]]; then
     echo "ERROR: Environment file not found: $ENV_FILE" >&2
-    echo "Run borg-setup.sh first or set BACKUP_ENV_FILE." >&2
+    echo "Run setup.sh first or set BACKUP_ENV_FILE." >&2
     exit 1
 fi
 # shellcheck source=/dev/null

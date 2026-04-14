@@ -39,7 +39,7 @@
 
 ```bash
 # Kiedy był ostatni udany backup?
-cat /var/log/borg-backup-last-success
+cat /var/log/backup-last-success
 ```
 
 Jeśli data jest dzisiejsza lub wczorajsza, backupy działają.
@@ -51,7 +51,7 @@ Jeśli data jest dzisiejsza lub wczorajsza, backupy działają.
 systemctl list-timers borg-*
 
 # Jaki był wynik ostatniego backupu?
-systemctl status borg-backup.service
+systemctl status backup.service
 
 # Wylistuj wszystkie archiwa backupów
 source /root/.backup-secrets.env && export BORG_REPO BORG_PASSPHRASE
@@ -63,7 +63,7 @@ borg list
 System automatycznie testuje odtwarzanie 1-go dnia każdego miesiąca i wysyła powiadomienie Gotify. Sprawdź:
 
 ```bash
-cat /var/log/borg-test-restore-last
+cat /var/log/test-restore-last
 ```
 
 ---
@@ -306,7 +306,7 @@ cd /home/user/apps/mystack && docker compose up -d
 ```bash
 git clone https://github.com/pavlojs/flex-backup-system.git
 cd flex-backup-system
-bash borg-setup.sh  # Lub borg-setup-gdrive.sh
+bash setup.sh  # Lub setup-gdrive.sh
 ```
 
 ### Krok 10: Zmień WSZYSTKIE dane dostępowe
@@ -333,7 +333,7 @@ Wykonaj dokładnie **Scenariusz C** — kroki są identyczne. Jedyna różnica: 
 Aby całkowicie usunąć system backupu i wrócić do czystego systemu:
 
 ```bash
-sudo /root/borg-uninstall.sh
+sudo /root/uninstall.sh
 ```
 
 Skrypt interaktywnie zapyta o potwierdzenie:
@@ -349,12 +349,12 @@ Po uruchomieniu serwer nie będzie miał zainstalowanego systemu backupu.
 
 ```bash
 # Zatrzymaj timery
-systemctl stop borg-backup.timer borg-test-restore.timer
-systemctl disable borg-backup.timer borg-test-restore.timer
+systemctl stop backup.timer test-restore.timer
+systemctl disable backup.timer test-restore.timer
 
 # Usuń pliki systemd
-rm -f /etc/systemd/system/borg-backup.{service,timer}
-rm -f /etc/systemd/system/borg-test-restore.{service,timer}
+rm -f /etc/systemd/system/backup.{service,timer}
+rm -f /etc/systemd/system/test-restore.{service,timer}
 systemctl daemon-reload
 
 # Usuń lokalne repozytorium (UWAGA — usuwa wszystkie lokalne backupy!)
@@ -365,11 +365,11 @@ source /root/.backup-secrets.env
 rclone purge "$RCLONE_DEST"
 
 # Usuń skrypty i konfigurację
-rm -f /root/borg-backup.sh /root/borg-test-restore.sh /root/borg-uninstall.sh
+rm -f /root/backup.sh /root/test-restore.sh /root/uninstall.sh
 rm -f /root/.backup-secrets.env
-rm -f /var/log/borg-backup.log /var/log/borg-backup-last-success /var/log/borg-test-restore-last
-rm -f /var/lock/borg-backup.lock
-rm -f /etc/logrotate.d/borg-backup
+rm -f /var/log/backup.log /var/log/backup-last-success /var/log/test-restore-last
+rm -f /var/lock/backup.lock
+rm -f /etc/logrotate.d/backup
 
 # Opcjonalne usunięcie pakietów
 apt-get remove -y borgbackup rclone
@@ -383,14 +383,14 @@ apt-get remove -y borgbackup rclone
 |---------|------|
 | `/root/.backup-secrets.env` | Cała konfiguracja i dane dostępowe |
 | `/var/backups/borg/` | Lokalne repozytorium borg (wszystkie dane backupu) |
-| `/root/borg-backup.sh` | Główny skrypt backupu |
-| `/root/borg-test-restore.sh` | Skrypt miesięcznego testu odtwarzania |
-| `/root/borg-uninstall.sh` | Skrypt usuwania |
-| `/var/log/borg-backup.log` | Plik logu backupu |
-| `/var/log/borg-backup-last-success` | Czas ostatniego udanego backupu |
-| `/var/log/borg-test-restore-last` | Czas ostatniego testu odtwarzania |
-| `/etc/systemd/system/borg-backup.*` | Usługa i timer systemd |
-| `/etc/systemd/system/borg-test-restore.*` | Jednostki systemd testu odtwarzania |
+| `/root/backup.sh` | Główny skrypt backupu |
+| `/root/test-restore.sh` | Skrypt miesięcznego testu odtwarzania |
+| `/root/uninstall.sh` | Skrypt usuwania |
+| `/var/log/backup.log` | Plik logu backupu |
+| `/var/log/backup-last-success` | Czas ostatniego udanego backupu |
+| `/var/log/test-restore-last` | Czas ostatniego testu odtwarzania |
+| `/etc/systemd/system/backup.*` | Usługa i timer systemd |
+| `/etc/systemd/system/test-restore.*` | Jednostki systemd testu odtwarzania |
 
 ---
 
