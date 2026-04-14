@@ -130,11 +130,33 @@ rclone config create r2 s3 \
 ok "rclone remote 'r2' configured"
 
 # ---------------------------------------------------------------------------
-# Step 7: Create R2 bucket
+# Step 7: Verify R2 bucket exists (connectivity test)
 # ---------------------------------------------------------------------------
-info "Creating R2 bucket: ${R2_BUCKET:-borg-backup}"
-rclone mkdir "r2:${R2_BUCKET:-borg-backup}" 2>/dev/null || true
-ok "R2 bucket ready"
+info "Verifying R2 bucket: ${R2_BUCKET:-borg-backup}"
+echo ""
+warn "⚠  Cloudflare R2 does NOT support creating buckets via S3 API"
+warn "   for EU jurisdiction. The bucket must already exist."
+warn "   Create it manually: Cloudflare Dashboard → R2 → Create bucket"
+echo ""
+
+# Write a small test file to verify connectivity
+TEST_FILE=$(mktemp)
+echo "flex-backup-system connectivity test $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TEST_FILE"
+
+if rclone copyto "$TEST_FILE" "r2:${R2_BUCKET:-borg-backup}/.flex-backup-test" 2>&1; then
+    rclone deletefile "r2:${R2_BUCKET:-borg-backup}/.flex-backup-test" 2>/dev/null || true
+    rm -f "$TEST_FILE"
+    ok "R2 bucket verified — write test passed"
+else
+    rm -f "$TEST_FILE"
+    echo ""
+    err "Cannot write to R2 bucket '${R2_BUCKET:-borg-backup}'."
+    err "Possible causes:"
+    err "  1. Bucket does not exist — create it in Cloudflare Dashboard"
+    err "  2. Wrong R2_ENDPOINT (check account ID)"
+    err "  3. API token lacks write permissions"
+    die "Fix the issue above and re-run setup."
+fi
 
 # ---------------------------------------------------------------------------
 # Step 8: Initialize borg repository

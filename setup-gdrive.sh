@@ -137,11 +137,29 @@ done
 ok "Configuration validated"
 
 # ---------------------------------------------------------------------------
-# Step 7: Create Google Drive folder
+# Step 7: Create Google Drive folder + connectivity test
 # ---------------------------------------------------------------------------
 info "Creating Google Drive folder: ${RCLONE_GDRIVE_FOLDER:-borg-backup}"
 rclone mkdir "${RCLONE_REMOTE:-gdrive}:${RCLONE_GDRIVE_FOLDER:-borg-backup}" 2>/dev/null || true
-ok "Google Drive folder ready"
+
+# Write a small test file to verify connectivity
+TEST_FILE=$(mktemp)
+echo "flex-backup-system connectivity test $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TEST_FILE"
+
+if rclone copyto "$TEST_FILE" "${RCLONE_REMOTE:-gdrive}:${RCLONE_GDRIVE_FOLDER:-borg-backup}/.flex-backup-test" 2>&1; then
+    rclone deletefile "${RCLONE_REMOTE:-gdrive}:${RCLONE_GDRIVE_FOLDER:-borg-backup}/.flex-backup-test" 2>/dev/null || true
+    rm -f "$TEST_FILE"
+    ok "Google Drive verified — write test passed"
+else
+    rm -f "$TEST_FILE"
+    echo ""
+    err "Cannot write to Google Drive folder '${RCLONE_GDRIVE_FOLDER:-borg-backup}'."
+    err "Possible causes:"
+    err "  1. OAuth token expired — re-run 'rclone config' for gdrive remote"
+    err "  2. Insufficient Google Drive permissions"
+    err "  3. Google Drive storage quota exceeded"
+    die "Fix the issue above and re-run setup."
+fi
 
 # ---------------------------------------------------------------------------
 # Step 8: Initialize borg repository
